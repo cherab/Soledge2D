@@ -1,0 +1,366 @@
+# Copyright 2016-2018 Euratom
+# Copyright 2016-2018 United Kingdom Atomic Energy Authority
+# Copyright 2016-2018 Centro de Investigaciones Energéticas, Medioambientales y Tecnológicas
+#
+# Licensed under the EUPL, Version 1.1 or – as soon they will be approved by the
+# European Commission - subsequent versions of the EUPL (the "Licence");
+# You may not use this work except in compliance with the Licence.
+# You may obtain a copy of the Licence at:
+#
+# https://joinup.ec.europa.eu/software/page/eupl5
+#
+# Unless required by applicable law or agreed to in writing, software distributed
+# under the Licence is distributed on an "AS IS" basis, WITHOUT WARRANTIES OR
+# CONDITIONS OF ANY KIND, either express or implied.
+#
+# See the Licence for the specific language governing permissions and limitations
+# under the Licence.
+
+import re
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.constants import atomic_mass, electron_mass
+
+# Raysect imports
+from raysect.core.math.interpolators import Discrete2DMesh
+from raysect.core import translate, Point3D, Vector3D, Node, AffineMatrix3D
+from raysect.primitive import Cylinder
+from raysect.optical import Spectrum
+
+# CHERAB core imports
+from cherab.core import Plasma, Species, Maxwellian
+from cherab.core.math.mappers import AxisymmetricMapper
+from cherab.core.atomic.elements import hydrogen, deuterium, helium, beryllium, carbon, nitrogen, oxygen, neon, \
+    argon, krypton, xenon
+
+# This SOLPS package imports
+from .functions3d import SOLEDGE2DFunction3D, SOLEDGE2DVectorFunction3D
+from .mesh_geometry import SOLEDGE2DMesh
+
+
+Q = 1.602E-19
+
+_species_symbol_map = {
+    'D': deuterium,
+    'C': carbon,
+    'He': helium,
+    'N': nitrogen,
+    'Ne': neon,
+    'Ar': argon,
+    'Kr': krypton,
+    'Xe': xenon,
+}
+
+_SPECIES_REGEX = '([a-zA-z]+)\+?([0-9]+)'
+
+
+# TODO: this interface is half broken - some routines expect internal data as arrays, others as function 3d
+class SOLEDGE2DSimulation:
+
+    def __init__(self, mesh):
+
+        self.mesh = mesh
+
+        self._electron_temperature = None
+        self._electron_density = None
+        self._species_list = None
+        self._species_density = None
+        self._rad_par_flux = None
+        self._radial_area = None
+        self._b2_neutral_densities = None
+        self._velocities_parallel = None
+        self._velocities_radial = None
+        self._velocities_toroidal = None
+        self._velocities_cartesian = None
+        self._inside_mesh = None
+        self._total_rad = None
+        self._b_field_vectors = None
+        self._b_field_vectors_cartesian = None
+        self._parallel_velocities = None
+        self._radial_velocities = None
+        self._eirene_model = None
+        self._b2_model = None
+        self._eirene = None
+
+    @property
+    def electron_temperature(self):
+        """
+        Simulated electron temperatures at each mesh cell.
+        :return:
+        """
+        return self._electron_temperature
+
+    @property
+    def electron_density(self):
+        """
+        Simulated electron densities at each mesh cell.
+        :return:
+        """
+        return self._electron_density
+
+    @property
+    def species_list(self):
+        """
+        Text list of species elements present in the simulation.
+        :return:
+        """
+        return self._species_list
+
+    @property
+    def species_density(self):
+        """
+        Array of species densities at each mesh cell.
+        :return:
+        """
+        return self._species_density
+
+    @property
+    def radial_particle_flux(self):
+        """
+        Blah
+        :return:
+        """
+        return self._rad_par_flux
+
+    @property
+    def radial_area(self):
+        """
+        Blah
+        :return:
+        """
+        return self._radial_area
+
+    @property
+    def b2_neutral_densities(self):
+        """
+        Neutral atom densities from B2
+        :return:
+        """
+        return self._b2_neutral_densities
+
+    @property
+    def velocities_parallel(self):
+        return self._velocities_parallel
+
+    @property
+    def velocities_radial(self):
+        return self._velocities_radial
+
+    @property
+    def velocities_toroidal(self):
+        return self._velocities_toroidal
+
+    @property
+    def velocities_cartesian(self):
+        return self._velocities_cartesian
+
+    @property
+    def inside_volume_mesh(self):
+        """
+        Function3D for testing if point p is inside the simulation mesh.
+        """
+        if self._inside_mesh is None:
+            raise RuntimeError("Inside mesh test not available for this simulation")
+        else:
+            return self._inside_mesh
+
+    @property
+    def parallel_velocities(self):
+        """
+        Plasma velocity field at each mesh cell.
+        """
+        if self._parallel_velocities is None:
+            raise RuntimeError("Parallel velocities not available for this simulation")
+        else:
+            return self._parallel_velocities
+
+    @property
+    def radial_velocities(self):
+        """
+        Calculated radial velocity components for each species.
+        """
+        if self._parallel_velocities is None:
+            raise RuntimeError("Radial velocities not available for this simulation")
+        else:
+            return self._radial_velocities
+
+    @property
+    def b_field(self):
+        """
+        Magnetic B field at each mesh cell in mesh cell coordinates (b_parallel, b_radial b_toroidal).
+        """
+        if self._b_field_vectors is None:
+            raise RuntimeError("Magnetic field not available for this simulation")
+        else:
+            return self._b_field_vectors
+
+    @property
+    def b_field_cartesian(self):
+        """
+        Magnetic B field at each mesh cell in cartesian coordinates (Bx, By, Bz).
+        """
+        if self._b_field_vectors_cartesian is None:
+            raise RuntimeError("Magnetic field not available for this simulation")
+        else:
+            return self._b_field_vectors_cartesian
+
+    @property
+    def eirene_simulation(self):
+        """
+        Data from an underlying EIRENE simulation.
+
+        :rtype: Eirene
+        """
+        if self._eirene is None:
+            raise RuntimeError("EIRENE simulation data not available for this simulation")
+        else:
+            return self._eirene
+
+    def __getstate__(self):
+        state = {
+            'mesh': self.mesh.__getstate__(),
+            'electron_temperature': self._electron_temperature,
+            'electron_density': self._electron_density,
+            'species_list': self._species_list,
+            'species_density': self._species_density,
+            'rad_par_flux': self._rad_par_flux,
+            'radial_area': self._radial_area,
+            'b2_neutral_densities': self._b2_neutral_densities,
+            'velocities_parallel': self._velocities_parallel,
+            'velocities_radial': self._velocities_radial,
+            'velocities_toroidal': self._velocities_toroidal,
+            'velocities_cartesian': self._velocities_cartesian,
+            'inside_mesh': self._inside_mesh,
+            'total_rad': self._total_rad,
+            'b_field_vectors': self._b_field_vectors,
+            'b_field_vectors_cartesian': self._b_field_vectors_cartesian,
+            'parallel_velocities': self._parallel_velocities,
+            'radial_velocities': self._radial_velocities,
+            'eirene_model': self._eirene_model,
+            'b2_model': self._b2_model,
+            'eirene': self._eirene
+        }
+        return state
+
+    def __setstate__(self, state):
+        self._electron_temperature = state['electron_temperature']
+        self._electron_density = state['electron_density']
+        self._species_list = state['species_list']
+        self._species_density = state['species_density']
+        self._rad_par_flux = state['rad_par_flux']
+        self._radial_area = state['radial_area']
+        self._b2_neutral_densities = state['b2_neutral_densities']
+        self._velocities_parallel = state['velocities_parallel']
+        self._velocities_radial = state['velocities_radial']
+        self._velocities_toroidal = state['velocities_toroidal']
+        self._velocities_cartesian = state['velocities_cartesian']
+        self._inside_mesh = state['inside_mesh']
+        self._total_rad = state['total_rad']
+        self._b_field_vectors = state['b_field_vectors']
+        self._b_field_vectors_cartesian = state['b_field_vectors_cartesian']
+        self._parallel_velocities = state['parallel_velocities']
+        self._radial_velocities = state['radial_velocities']
+        self._eirene_model = state['eirene_model']
+        self._b2_model = state['b2_model']
+        self._eirene = state['eirene']
+
+    def save(self, filename):
+
+        file_handle = open(filename, 'wb')
+        pickle.dump(self.__getstate__(), file_handle)
+        file_handle.close()
+
+    def create_plasma(self, parent=None, transform=None, name=None):
+        """
+        Make a CHERAB plasma object from this SOLEGE2D simulation.
+
+        :param Node parent: The plasma's parent node in the scenegraph, e.g. a World object.
+        :param AffineMatrix3D transform: Affine matrix describing the location and orientation
+        of the plasma in the world.
+        :param str name: User friendly name for this plasma (default = "SOLEDGE2D Plasma").
+        :rtype: Plasma
+        """
+
+        mesh = self.mesh
+        name = name or "SOLEDGE2D Plasma"
+        plasma = Plasma(parent=parent, transform=transform, name=name)
+        radius = mesh.mesh_extent['maxr']
+        height = mesh.mesh_extent['maxz'] - mesh.mesh_extent['minz']
+        plasma.geometry = Cylinder(radius, height)
+        plasma.geometry_transform = translate(0, 0, mesh.mesh_extent['minz'])
+
+        tri_index_lookup = self.mesh.triangle_index_lookup
+        tri_to_grid = self.mesh.triangle_to_grid_map
+
+        if isinstance(self._b_field_vectors, np.ndarray):
+            plasma.b_field = SOLEDGE2DVectorFunction3D(tri_index_lookup, tri_to_grid, self._b_field_vectors_cartesian)
+        else:
+            print('Warning! No magnetic field data available for this simulation.')
+
+        # Create electron species
+        triangle_data = _map_data_onto_triangles(self._electron_temperature)
+        electron_te_interp = Discrete2DMesh(mesh.vertex_coords, mesh.triangles, triangle_data, limit=False)
+        electron_temp = AxisymmetricMapper(electron_te_interp)
+        triangle_data = _map_data_onto_triangles(self._electron_density)
+        electron_ne_interp = Discrete2DMesh.instance(electron_te_interp, triangle_data)
+        electron_dens = AxisymmetricMapper(electron_ne_interp)
+        electron_velocity = lambda x, y, z: Vector3D(0, 0, 0)
+        plasma.electron_distribution = Maxwellian(electron_dens, electron_temp, electron_velocity, electron_mass)
+
+        if not isinstance(self.velocities_cartesian, np.ndarray):
+            print('Warning! No velocity field data available for this simulation.')
+
+        b2_neutral_i = 0  # counter for B2 neutrals
+        for k, sp in enumerate(self.species_list):
+
+            # Identify the species based on its symbol
+            symbol, charge = re.match(_SPECIES_REGEX, sp).groups()
+            charge = int(charge)
+            species_type = _species_symbol_map[symbol]
+
+            # If neutral and B" atomic density available,  use B2 density, otherwise use fluid species density.
+            if isinstance(self.b2_neutral_densities, np.ndarray) and charge == 0:
+                species_dens_data = self.b2_neutral_densities[:, :, b2_neutral_i]
+                b2_neutral_i += 1
+            else:
+                species_dens_data = self.species_density[:, :, k]
+
+            triangle_data = _map_data_onto_triangles(species_dens_data)
+            dens = AxisymmetricMapper(Discrete2DMesh.instance(electron_te_interp, triangle_data))
+            # dens = SOLPSFunction3D(tri_index_lookup, tri_to_grid, species_dens_data)
+
+            # Create the velocity vector lookup function
+            if isinstance(self.velocities_cartesian, np.ndarray):
+                velocity = SOLEDGE2DVectorFunction3D(tri_index_lookup, tri_to_grid, self.velocities_cartesian[:, :, k, :])
+            else:
+                velocity = lambda x, y, z: Vector3D(0, 0, 0)
+
+            distribution = Maxwellian(dens, electron_temp, velocity, species_type.atomic_weight * atomic_mass)
+            plasma.composition.add(Species(species_type, charge, distribution))
+
+        return plasma
+
+
+def _map_data_onto_triangles(solps_dataset):
+    """
+    Reshape a SOLPS data array so that it matches the triangles in the SOLPS mesh.
+
+    :param ndarray solps_dataset: Given SOLPS dataset, typically of shape (98 x 32).
+    :return: New 1D ndarray with shape (98*32*2)
+    """
+
+    solps_mesh_shape = solps_dataset.shape
+    triangle_data = np.zeros(solps_mesh_shape[0] * solps_mesh_shape[1] * 2, dtype=np.float64)
+
+    tri_index = 0
+    for i in range(solps_mesh_shape[0]):
+        for j in range(solps_mesh_shape[1]):
+
+            # Same data
+            triangle_data[tri_index] = solps_dataset[i, j]
+            tri_index += 1
+            triangle_data[tri_index] = solps_dataset[i, j]
+            tri_index += 1
+
+    return triangle_data
