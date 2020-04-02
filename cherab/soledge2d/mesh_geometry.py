@@ -21,7 +21,7 @@ from collections import namedtuple
 
 import numpy as np
 import matplotlib.pyplot as plt
-from raysect.core.math.interpolators import Discrete2DMesh
+from raysect.core.math.function import Discrete2DMesh
 
 INFINITY = 1E99
 

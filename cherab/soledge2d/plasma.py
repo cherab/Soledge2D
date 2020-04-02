@@ -19,24 +19,21 @@
 import re
 import pickle
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.constants import atomic_mass, electron_mass
 
 # Raysect imports
-from raysect.core.math.interpolators import Discrete2DMesh
-from raysect.core import translate, Point3D, Vector3D, Node, AffineMatrix3D
+from raysect.core.math.function import Discrete2DMesh
+from raysect.core.math import translate, Vector3D
 from raysect.primitive import Cylinder
-from raysect.optical import Spectrum
 
 # CHERAB core imports
 from cherab.core import Plasma, Species, Maxwellian
-from cherab.core.math.mappers import AxisymmetricMapper
+from cherab.core.math import AxisymmetricMapper
 from cherab.core.atomic.elements import hydrogen, deuterium, helium, beryllium, carbon, nitrogen, oxygen, neon, \
     argon, krypton, xenon
 
 # This SOLPS package imports
 from .functions3d import SOLEDGE2DFunction3D, SOLEDGE2DVectorFunction3D
-from .mesh_geometry import SOLEDGE2DMesh
 
 
 Q = 1.602E-19
